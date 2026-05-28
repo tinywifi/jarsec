@@ -1,28 +1,27 @@
-# JARSEC 🔍
+# Jarsec
 
-**Jarsec Malware Analysis Task Force** — a Claude Code skill for comprehensive static and dynamic analysis of Minecraft mods (JARs or source code) to detect malicious behavior, infostealers, RATs, obfuscation, and C2 infrastructure.
+A Claude Code skill that analyzes Minecraft mods for malware. It does both static analysis (reading the code) and dynamic analysis (actually running the mod in a sandbox) to check for infostealers, RATs, obfuscation, C2 infrastructure, and other nasty stuff.
 
-## Installation
+## Install
 
 ```bash
 npx skills add https://github.com/tinywifi/jarsec
 ```
 
-## Prerequisites
+## What you need
 
-- **Docker** (required for dynamic sandbox — the suspicious mod is NEVER run on your host)
-- Optional: `openjdk-21-jdk`, `unzip`, `tcpdump`, `tshark`, `strace`, `python3-pip` (for enhanced telemetry)
+- **Docker** (required - the mod never runs on your actual machine)
+- Optional extras: `openjdk-21-jdk`, `unzip`, `tcpdump`, `tshark`, `strace`, `python3-pip`
 
-Jarsec checks for missing tools at startup and tells you exactly what to install.
+Jarsec will check what you have installed and tell you exactly what's missing.
 
-## Usage
+## How to use it
 
-### Analyze source code in current directory
+### Analyze the source code in your current folder
 ```bash
 claude
 /jarsec
 ```
-Assumes the current folder is a Minecraft mod source project. Runs static analysis on all files, then builds and dynamically detonates in Docker.
 
 ### Analyze a local JAR file
 ```bash
@@ -30,40 +29,47 @@ claude
 /jarsec /path/to/mod.jar
 ```
 
-### Download and analyze a JAR from URL
+### Download and analyze a JAR from a URL
 ```bash
 claude
 /jarsec https://cdn.modrinth.com/data/.../mod.jar
 ```
 
-## What Jarsec Checks
+## What it actually checks
 
-| Phase | Checks |
-|-------|--------|
-| **Static — Agent 1** | Build config, embedded libs, native binaries, asset steganography |
-| **Static — Agent 2** | Infostealer signatures, Weedhack IOCs, malicious APIs, persistence, droppers, viral propagation |
-| **Static — Agent 3** | Hardcoded URLs/C2, Telegram/blockchain C2, mixin review, BleedingPipe deserialization |
-| **Static — Agent 4** | Reflection, obfuscation footprints, anti-sandbox, JVM abuse, steganographic decoders |
-| **Dynamic — Docker** | Full client detonation with honeytokens, tcpdump network capture, strace syscall monitoring, lsof file access checks |
+**Static analysis (4 agents running in parallel):**
+- Build configuration for malicious repos, shadow jars, or obfuscation
+- Infostealer signatures (Discord webhooks, token grabbers, session theft)
+- Known Weedhack/majanito malware IOCs
+- Malicious APIs (Runtime.exec, ProcessBuilder, clipboard hijacking, etc.)
+- Persistence mechanisms (startup injection, registry keys, scheduled tasks)
+- Stage-2 droppers (OS fingerprinting, temp file writes, URLClassLoader)
+- Viral propagation (JAR/zip file iteration, self-replication)
+- Network C2 (hardcoded URLs, Telegram bots, blockchain/Ethereum C2)
+- Mixin review (checking if mixins intercept sensitive packets without good reason)
+- Unsafe deserialization (BleedingPipe vectors)
+- Reflection abuse, anti-sandbox checks, JVM instrumentation, steganography
 
-## How It Works
+**Dynamic analysis (Docker sandbox):**
+- Runs the actual Minecraft client with the mod loaded
+- Plants fake Discord tokens and Minecraft session files as honeypots
+- Captures all network traffic with tcpdump
+- Monitors file system access with strace and lsof
+- Streams live telemetry to your terminal
 
-1. **Target detection** — determines if you gave a URL, file path, or nothing (current dir)
-2. **Prerequisite check** — verifies Docker and optional tools exist
-3. **4 parallel static agents** — search the codebase for known malware signatures
-4. **Build gate** — if source code, compiles the mod first
-5. **Docker dynamic sandbox** — detonates the mod in an isolated container with:
-   - Fake Discord tokens and Minecraft session files (honeytokens)
-   - `tcpdump` network capture
-   - `strace` / `lsof` file system monitoring
-   - PortableMC to launch the actual Minecraft client with the mod loaded
-6. **Synthesis report** — compiles all findings with a single-word verdict: **CLEAN**, **SUSPICIOUS**, or **MALICIOUS**
+## How it works
+
+1. Figures out what you gave it (URL, file path, or current directory)
+2. Checks that Docker is installed
+3. Spawns 4 static analysis agents in parallel
+4. If it's source code, builds the mod first
+5. Spins up a throwaway Docker container and runs the mod inside it
+6. Watches everything the mod tries to do
+7. Gives you a report with a single word verdict: **CLEAN**, **SUSPICIOUS**, or **MALICIOUS**
 
 ## Safety
 
-- The suspicious mod **never touches your host** — all dynamic analysis runs inside a throwaway Docker container
-- Honeytoken files are planted inside the container to detect credential theft attempts
-- Container is automatically destroyed after analysis
+The mod never touches your host. Everything dynamic happens inside a Docker container that gets destroyed after analysis. Even if the mod is pure evil, your machine is safe.
 
 ## License
 
