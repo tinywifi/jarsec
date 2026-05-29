@@ -190,19 +190,27 @@ fi
 ## Step 3: Static Analysis (4 Agents in Parallel)
 
 ### Agent 1 — Structural & Build Analyst
-**Work on `${EXTRACTED_DIR}` for structural analysis. Reference `${DECOMPILED_DIR}` for class counts and package structure.**
+> ⚠️ **Do NOT use `javap` on individual `.class` files.** Decompiled `.java` source is already available at `${DECOMPILED_DIR}`. Read those instead.
 
 1. Compute SHA256/MD5 of target files. Verify ZIP/JAR magic.
-2. Map archive/source tree. List classes, mixins, assets, configs. Check `META-INF/MANIFEST.MF`.
-3. Deeply inspect `build.gradle.kts`, `settings.gradle.kts`, `pom.xml`. Look for malicious repos, unauthorized buildscript deps, `exec`/`commandLine`/`ProcessBuilder` tasks, Shadow/FatJar abuse, hidden obfuscation.
+2. **Structural mapping (use `${EXTRACTED_DIR}`):**
+   - List top-level packages, class count, file types
+   - Check `META-INF/MANIFEST.MF`
+   - Read `fabric.mod.json`, `mods.toml`, `plugin.yml` — extract MC version, loader, deps, entrypoints. **Pipe metadata to Dynamic Sandbox.**
+   - Scan `.png`, `.ogg`, `.json` for anomalous sizes, trailing EOF data, high-entropy buffers
+3. **Build config scan (use `${EXTRACTED_DIR}` or source root):**
+   - Inspect `build.gradle.kts`, `settings.gradle.kts`, `pom.xml` for malicious repos, unauthorized buildscript deps, `exec`/`commandLine`/`ProcessBuilder`, Shadow/FatJar abuse
    - **Verdict: PASS / SUSPICIOUS / FAIL**
 4. Check nested JARs SHA256. Flag `.dll`, `.so`, `.dylib`, `.dat`. Flag known Weedhack signatures:
    - `/dev/jnic/lib/a125e430-2459-4702-9797-49fce5f280ae.dat`
    - `/dev/jnic/lib/c4f763d6-e34c-42e9-bba1-b80cfa5a55df.dat`
-5. Read `fabric.mod.json`, `mods.toml`, `plugin.yml`. Extract MC version, loader, deps, entrypoints. **Pipe metadata to Dynamic Sandbox.**
+5. **Code structure (use `${DECOMPILED_DIR}` .java files, NOT `javap`):**
+   - List decompiled classes, packages, entrypoints (`onInitialize`, `main`, `premain`)
+   - Read 3-5 most interesting `.java` files (largest, entrypoint, network-related) to understand architecture
+   - Look for method signatures: `ProcessBuilder`, `HttpClient`, `Socket`, `URLClassLoader`, `defineClass`
 6. Extract author info. Distinguish edgy branding from malicious signatures.
-7. Scan `.png`, `.ogg`, `.json` for anomalous sizes, trailing EOF data, high-entropy buffers.
-8. Report which decompiler was used (Vineflower / CFR / none) and how many `.java` files were produced.
+7. Report which decompiler was used (Vineflower / CFR / none) and how many `.java` files were produced.
+8. If decrypted strings are available (`${JARSEC_RUN}/decrypted_strings.txt`), summarize key findings.
 
 ### Agent 2 — Bytecode & Threat Analyst
 **Work on `${DECOMPILED_DIR}` (decompiled Java source). If decompilation failed, fall back to `${EXTRACTED_DIR}` (raw bytecode).**
