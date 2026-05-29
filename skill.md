@@ -160,6 +160,31 @@ find "${DECOMPILED_DIR}/" -type f | wc -l
 | `${EXTRACTED_DIR}` | Raw JAR contents (`.class`, `META-INF/`, configs) | Agent 1 (structural), fallback |
 | `${DECOMPILED_DIR}` | Decompiled `.java` source files | Agents 2-4 (code analysis) |
 
+### Run static string decryptor
+
+```bash
+# Ensure decryptor is available (auto-download from repo if missing)
+DECRYPTOR="$HOME/.claude/skills/jarsec/jarsec-decrypt.py"
+if [ ! -f "$DECRYPTOR" ]; then
+  mkdir -p "$HOME/.jarsec"
+  curl -sL -o "$DECRYPTOR" \
+    "https://raw.githubusercontent.com/tinywifi/jarsec/main/jarsec-decrypt.py" 2>/dev/null || true
+fi
+
+if [ -f "$DECRYPTOR" ]; then
+  python3 "$DECRYPTOR" "${DECOMPILED_DIR}" > "${JARSEC_RUN}/decrypted_strings.txt" 2> "${JARSEC_RUN}/decryptor_errors.log" || true
+  if [ -s "${JARSEC_RUN}/decrypted_strings.txt" ]; then
+    echo "=== DECRYPTED STRINGS ==="
+    tail -n +$(grep -n "PLAINTEXT STRINGS" "${JARSEC_RUN}/decrypted_strings.txt" | tail -1 | cut -d: -f1) "${JARSEC_RUN}/decrypted_strings.txt" 2>/dev/null | head -50
+    echo "--- Full output: ${JARSEC_RUN}/decrypted_strings.txt ---"
+  else
+    echo "No encrypted strings decrypted."
+  fi
+else
+  echo "⚠️ jarsec-decrypt.py not found. Install from https://github.com/tinywifi/jarsec"
+fi
+```
+
 **If target is SOURCE CODE folder:** Skip decompilation. Set `${DECOMPILED_DIR}` to the source folder path.
 
 ## Step 3: Static Analysis (4 Agents in Parallel)
@@ -193,12 +218,34 @@ find "${DECOMPILED_DIR}/" -type f | wc -l
 7. Log scrubbing: `System.setOut`, `System.setErr`, Log4j filter injection.
 
 ### Agent 3 — Network & Engine Analyst
-**Work on `${DECOMPILED_DIR}` (decompiled Java source). If decompilation failed, fall back to `${EXTRACTED_DIR}` (raw bytecode).**
+> ⚠️ **Use ONLY batch recursive `grep -r`. NEVER read files individually.** Token budget is tight.
+> **Work on `${DECOMPILED_DIR}` (decompiled Java source). If decompilation failed, use `${EXTRACTED_DIR}` (raw bytecode).**
 
-1. Extract hardcoded URLs, IPs, Discord webhooks, base64 endpoints. Flag Weedhack domains: `receiver.cy`, `weedhack.cy`.
-2. Alternative C2: Telegram (`api.telegram.org`), Ethereum (`0xce6d41de`, RSA key `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtmNzDf...`).
-3. Mixin review: List all SpongePowered mixins. Flag mixins intercepting `ClientPacketListener`, auth packets, `GameRenderer`, `LevelRenderer` without clear gameplay purpose.
-4. BleedingPipe: `ObjectInputStream.readObject()`, `Kryo`, unvalidated reflection in packet handlers.
+Run these 6 commands against `${DECOMPILED_DIR}`:
+
+```bash
+# 1. URLs, IPs, Discord webhooks, Telegram
+grep -roniE 'https?://[^"\s<>{}|\^`\[\]]+|discord(app)?\.(com|gg)/api/webhooks/[0-9]+/[^"\s]+|api\.telegram\.org/bot[0-9]+:[A-Za-z0-9_-]+|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]+)?\b' "${DECOMPILED_DIR}" 2>/dev/null | head -40
+
+# 2. Base64-like strings (40+ chars of A-Za-z0-9+/=)
+grep -roniE '\b[A-Za-z0-9+/]{40,}={0,2}\b' "${DECOMPILED_DIR}" 2>/dev/null | head -30
+
+# 3. Weedhack / known C2 domains
+grep -roniE 'receiver\.cy|weedhack\.cy|0xce6d41de|MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtmNzDf' "${DECOMPILED_DIR}" 2>/dev/null | head -20
+
+# 4. Mixin injections (SpongePowered)
+grep -roniE '@Mixin\s*\(|class\s+\w+.*implements.*Mixin|@Inject.*method.*=.*\{|@Redirect.*method.*=.*\{' "${DECOMPILED_DIR}" 2>/dev/null | head -30
+
+# 5. Mixin target classes of interest
+grep -roniE 'ClientPacketListener|ServerGamePacketListener|GameRenderer|LevelRenderer|PlayerList|Connection' "${DECOMPILED_DIR}" 2>/dev/null | head -30
+
+# 6. BleedingPipe / deserialization vectors
+grep -roniE 'ObjectInputStream\.readObject\(\)|Kryo|readUnshared\(\)|ObjectOutputStream' "${DECOMPILED_DIR}" 2>/dev/null | head -20
+```
+
+For each: report `NO MATCHES` or list `file:line: match` with assessment.
+
+**Also scan decrypted strings** from Step 2.6 if available — pipe them through the same URL/IP/webhook regexes.
 
 ### Agent 4 — Evasion & Obfuscation Analyst
 > ⚠️ **MUST complete in under 2 minutes.** Use ONLY batch recursive `grep -r`. **NEVER check files individually.**
