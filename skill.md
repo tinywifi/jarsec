@@ -339,7 +339,7 @@ EOF
 fi
 ```
 
-### Plant Honeytokens and start recording
+### Plant Honeytokens, start recording, and monitor filesystem
 ```bash
 docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
   -v "${TARGET_JAR}:/root/.minecraft/mods/target.jar:ro" \
@@ -352,6 +352,10 @@ docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
     echo '{\"accounts\":[{\"accessToken\":\"honeytoken_minecraft_xyz789\",\"username\":\"HoneyPlayer\",\"uuid\":\"00000000-0000-0000-0000-000000000001\"}]}' > /root/.minecraft/launcher_accounts.json
     Xvfb :99 -screen 0 1024x768x24 &
     sleep 2
+    # Start filesystem monitoring
+    inotifywait -m -r --format '%T %w %f %e' --timefmt '%H:%M:%S' \
+      /root/.minecraft /tmp /root/.config /root 2>/dev/null \
+      > /tmp/recordings/fs_events.log &
     # Start screen recording
     ffmpeg -f x11grab -i :99 -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -movflags +faststart /tmp/recordings/sandbox.mp4 &
     sleep 3600
@@ -450,14 +454,32 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
      timeout 300 portablemc start fabric:VERSION -u HoneyPlayer -i 00000000-0000-0000-0000-000000000001
    ```
 4. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
-5. Stop recording and extract artifacts:
+5. Stop recording, extract artifacts, and dump heap:
    ```bash
    # Gracefully stop ffmpeg
    docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" pkill -INT ffmpeg || true
    sleep 3
-   # Copy video recording out
+   # Copy artifacts out
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mp4" "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || true
-   ls -lh "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || echo "No video recording"
+   docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/fs_events.log" "${JARSEC_RUN}/fs_events.log" 2>/dev/null || true
+
+   # Java heap dump — extract runtime-decrypted strings
+   JAVA_PID=$(docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" pidof java 2>/dev/null || true)
+   if [ -n "$JAVA_PID" ]; then
+     echo "Dumping Java heap (PID: $JAVA_PID)..."
+     docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" jmap -dump:live,format=b,file=/tmp/heap.hprof "$JAVA_PID" 2>/dev/null || true
+     docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/heap.hprof" "${JARSEC_RUN}/heap.hprof" 2>/dev/null || true
+     if [ -f "${JARSEC_RUN}/heap.hprof" ]; then
+       echo "=== Runtime strings from heap ==="
+       strings "${JARSEC_RUN}/heap.hprof" | grep -oiE 'https?://[^"\s<>{}|\^`\[\]]+|discord|webhook|token|session|bearer|authorization' | sort -u | head -30
+     fi
+   fi
+
+   # Summarize filesystem events
+   if [ -f "${JARSEC_RUN}/fs_events.log" ]; then
+     echo "=== Filesystem events ==="
+     grep -E 'CREATE|MODIFY|DELETE' "${JARSEC_RUN}/fs_events.log" | head -20
+   fi
    ```
 6. After analysis:
    ```bash
@@ -632,6 +654,26 @@ Compile findings from all agents + dynamic sandbox + stage-2 analysis.
 
 For each category state: **PASS / SUSPICIOUS / FAIL**
 
+### Optional: VirusTotal Hash Check
+```bash
+VT_API_KEY="${VT_API_KEY:-}"
+if [ -n "$VT_API_KEY" ]; then
+  echo "=== VirusTotal Lookup ==="
+  TARGET_SHA=$(sha256sum "${TARGET_JAR}" | cut -d' ' -f1)
+  curl -s "https://www.virustotal.com/api/v3/files/${TARGET_SHA}" \
+    -H "x-apikey: ${VT_API_KEY}" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    attr = data.get('data', {}).get('attributes', {})
+    print(f'VT Score: {attr.get(\"last_analysis_stats\", {}).get(\"malicious\", 0)}/{sum(attr.get(\"last_analysis_stats\", {}).values())} detections')
+    print(f'VT Names: {attr.get(\"popular_threat_classification\", {}).get(\"suggested_threat_label\", \"unknown\")}')
+except Exception as e:
+    print(f'VT check failed: {e}')
+"
+fi
+```
+
 ### IOCs
 If suspicious/malicious activity found, list:
 | Type | IOC |
@@ -639,5 +681,54 @@ If suspicious/malicious activity found, list:
 | Network | IPs, Domains, URLs, Telegram, Blockchain, Discord Webhooks |
 | Host | SHA256 of payloads, modified paths, scheduled tasks, registry keys |
 | Stage-2 | URLs, SHA256s, and verdicts of secondary payloads |
+| Heap Strings | Runtime-decrypted strings extracted from heap dump |
+| Filesystem | Files created/modified/deleted inside sandbox |
+| Video | Screen recording of sandbox execution |
+
+### Generate STIX/MISP IOC Export
+```bash
+IOC_EXPORTER="$HOME/.claude/skills/jarsec/jarsec-ioc.py"
+if [ ! -f "$IOC_EXPORTER" ]; then
+  curl -sL -o "$IOC_EXPORTER" \
+    "https://raw.githubusercontent.com/tinywifi/jarsec/main/jarsec-ioc.py" 2>/dev/null || true
+fi
+if [ -f "$IOC_EXPORTER" ]; then
+  python3 "$IOC_EXPORTER" "${JARSEC_RUN}" "${TARGET_JAR}" 2>/dev/null || true
+  [ -f "${JARSEC_RUN}/stix_bundle.json" ] && echo "STIX: ${JARSEC_RUN}/stix_bundle.json"
+  [ -f "${JARSEC_RUN}/misp_event.json" ] && echo "MISP: ${JARSEC_RUN}/misp_event.json"
+fi
+```
+
+### Generate YARA Rule
+```bash
+YARA_GEN="$HOME/.claude/skills/jarsec/jarsec-yara.py"
+if [ ! -f "$YARA_GEN" ]; then
+  curl -sL -o "$YARA_GEN" \
+    "https://raw.githubusercontent.com/tinywifi/jarsec/main/jarsec-yara.py" 2>/dev/null || true
+fi
+if [ -f "$YARA_GEN" ]; then
+  python3 "$YARA_GEN" "${JARSEC_RUN}" "${TARGET_JAR}" 2>/dev/null || true
+  [ -f "${JARSEC_RUN}/yara_rule.yar" ] && echo "YARA: ${JARSEC_RUN}/yara_rule.yar"
+fi
+```
+
+### Artifacts Summary
+```bash
+echo "=== JARSEC ARTIFACTS ==="
+echo "Workspace:     ${JARSEC_RUN}"
+echo "Target:        ${TARGET_JAR}"
+echo "SHA256:        $(sha256sum '${TARGET_JAR}' | cut -d' ' -f1)"
+echo "Decompiled:    ${DECOMPILED_DIR}"
+echo "Video:         ${JARSEC_RUN}/sandbox.mp4"
+echo "Filesystem:    ${JARSEC_RUN}/fs_events.log"
+echo "Heap dump:     ${JARSEC_RUN}/heap.hprof"
+echo "STIX bundle:   ${JARSEC_RUN}/stix_bundle.json"
+echo "MISP event:    ${JARSEC_RUN}/misp_event.json"
+echo "YARA rule:     ${JARSEC_RUN}/yara_rule.yar"
+echo "Pcap:          ${PCAP_FILE}"
+echo "Decrypted:     ${JARSEC_RUN}/decrypted_strings.txt"
+echo "Extracted:     ${JARSEC_RUN}/extracted_strings.txt"
+echo "Stage-2:       ${JARSEC_RUN}/stage2/"
+```
 
 **Final verdict (single word): CLEAN / SUSPICIOUS / MALICIOUS**

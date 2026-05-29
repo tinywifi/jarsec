@@ -28,6 +28,7 @@ RUN apt-get update -qq \
         wget \
         ffmpeg \
         fonts-dejavu-core \
+        inotify-tools \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --break-system-packages --no-cache-dir portablemc \
     && mkdir -p /root/.minecraft/mods \
