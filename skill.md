@@ -322,28 +322,38 @@ For each: report `NO MATCHES` or list `file:line: context` with assessment.
 
 > Docker is mandatory. The suspicious mod must NEVER run directly on the host.
 
-### Build Container
+### Pull or build sandbox image
+
 ```bash
-docker build -t jarsec-sandbox - <<-'EOF'
+SANDBOX_IMAGE="ghcr.io/tinywifi/jarsec-sandbox:latest"
+
+# Try pre-built image first (fast — no apt/pip on every run)
+if ! docker pull "$SANDBOX_IMAGE" 2>/dev/null; then
+  echo "Pre-built image not available, building locally..."
+  docker build -t jarsec-sandbox - <<-'EOF'
 FROM eclipse-temurin:21-jdk
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pip xvfb libgl1 tcpdump > /dev/null 2>&1
-RUN pip3 install --break-system-packages portablemc > /dev/null 2>&1
-RUN mkdir -p /root/.minecraft/mods
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pip xvfb libgl1 libgl1-mesa-dri libpulse0 libxrandr2 libxss1 libxcursor1 libxinerama1 libxi6 tcpdump tshark strace lsof net-tools iproute2 curl wget ffmpeg fonts-dejavu-core > /dev/null 2>&1 && rm -rf /var/lib/apt/lists/* && pip3 install --break-system-packages --no-cache-dir portablemc > /dev/null 2>&1 && mkdir -p /root/.minecraft/mods /tmp/recordings
 WORKDIR /root
 EOF
+  SANDBOX_IMAGE="jarsec-sandbox"
+fi
 ```
 
-### Plant Honeytokens
+### Plant Honeytokens and start recording
 ```bash
 docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
   -v "${TARGET_JAR}:/root/.minecraft/mods/target.jar:ro" \
+  -v "${JARSEC_RUN}/recordings:/tmp/recordings" \
   -e DISPLAY=:99 \
-  jarsec-sandbox \
+  "$SANDBOX_IMAGE" \
   bash -c "
     mkdir -p '/root/.config/discord/Local Storage/leveldb'
     echo '{\"token\":\"honeytoken_fake_discord_abc123\"}' > '/root/.config/discord/Local Storage/leveldb/000003.log'
     echo '{\"accounts\":[{\"accessToken\":\"honeytoken_minecraft_xyz789\",\"username\":\"HoneyPlayer\",\"uuid\":\"00000000-0000-0000-0000-000000000001\"}]}' > /root/.minecraft/launcher_accounts.json
-    Xvfb :99 -screen 0 1024x768x16 &
+    Xvfb :99 -screen 0 1024x768x24 &
+    sleep 2
+    # Start screen recording
+    ffmpeg -f x11grab -i :99 -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -movflags +faststart /tmp/recordings/sandbox.mp4 &
     sleep 3600
   "
 ```
@@ -440,7 +450,16 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
      timeout 300 portablemc start fabric:VERSION -u HoneyPlayer -i 00000000-0000-0000-0000-000000000001
    ```
 4. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
-5. After analysis:
+5. Stop recording and extract artifacts:
+   ```bash
+   # Gracefully stop ffmpeg
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" pkill -INT ffmpeg || true
+   sleep 3
+   # Copy video recording out
+   docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mp4" "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || true
+   ls -lh "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || echo "No video recording"
+   ```
+6. After analysis:
    ```bash
    docker stop "jarsec-sandbox-${JARSEC_RUN##*/}" && docker rm "jarsec-sandbox-${JARSEC_RUN##*/}"
    rm -rf "${JARSEC_RUN}"
@@ -570,8 +589,9 @@ while IFS= read -r url; do
 
         docker run --rm --name "jarsec-stage2-${S2_RUN##*/}" \
           -v "$S2_TARGET:/payload.jar:ro" \
+          -v "${JARSEC_RUN}/recordings:/tmp/recordings" \
           -e DISPLAY=:99 \
-          jarsec-sandbox \
+          "$SANDBOX_IMAGE" \
           timeout 60 java -jar /payload.jar 2>/dev/null || echo "  Standalone execution failed (expected for library JARs)"
       else
         echo "  No main class found — skipping standalone execution"
