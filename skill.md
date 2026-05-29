@@ -349,6 +349,8 @@ docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
     mkdir -p '/root/.config/discord/Local Storage/leveldb'
     echo '{\"token\":\"honeytoken_fake_discord_abc123\"}' > '/root/.config/discord/Local Storage/leveldb/000003.log'
     echo '{\"accounts\":[{\"accessToken\":\"honeytoken_minecraft_xyz789\",\"username\":\"HoneyPlayer\",\"uuid\":\"00000000-0000-0000-0000-000000000001\"}]}' > /root/.minecraft/launcher_accounts.json
+    # Disable SSL certificate validation so the malware can connect to its C2
+    _JAVA_OPTIONS="-Djavax.net.ssl.trustStore=/dev/null -Dcom.sun.net.ssl.checkRevocation=false" \
     Xvfb :99 -screen 0 1024x768x24 &
     sleep 2
     # Start filesystem monitoring
