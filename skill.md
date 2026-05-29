@@ -448,12 +448,19 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
 ### Detonate
 1. Start host tcpdump (if available): `sudo tcpdump -i any -w "${PCAP_FILE}" -U -nn &`
 2. Dry run: `docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" portablemc start fabric:VERSION --dry`
-3. Live detonation (stream to main window):
+3. **Before detonation — snapshot container state:**
+   ```bash
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" \
+     bash -c "find /root /tmp -type f -printf '%s %p\n' 2>/dev/null | sort" \
+     > "${JARSEC_RUN}/fs_before.txt"
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" ps aux > "${JARSEC_RUN}/ps_before.txt"
+   ```
+4. Live detonation (stream to main window):
    ```bash
    docker exec -e DISPLAY=:99 "jarsec-sandbox-${JARSEC_RUN##*/}" \
      timeout 300 portablemc start fabric:VERSION -u HoneyPlayer -i 00000000-0000-0000-0000-000000000001
    ```
-4. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
+5. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
 5. Stop recording, extract artifacts, and dump heap:
    ```bash
    # Gracefully stop ffmpeg
@@ -480,6 +487,21 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
      echo "=== Filesystem events ==="
      grep -E 'CREATE|MODIFY|DELETE' "${JARSEC_RUN}/fs_events.log" | head -20
    fi
+
+   # Container state diff
+   echo ""
+   echo "=== Container State Diff ==="
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" \
+     bash -c "find /root /tmp -type f -printf '%s %p\n' 2>/dev/null | sort" \
+     > "${JARSEC_RUN}/fs_after.txt"
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" ps aux > "${JARSEC_RUN}/ps_after.txt"
+
+   echo "New/modified files:"
+   diff "${JARSEC_RUN}/fs_before.txt" "${JARSEC_RUN}/fs_after.txt" | grep '^>' | head -20
+
+   echo ""
+   echo "Process changes:"
+   diff "${JARSEC_RUN}/ps_before.txt" "${JARSEC_RUN}/ps_after.txt" | grep -E '^<|^>' | head -20
    ```
 6. After analysis:
    ```bash
@@ -674,6 +696,20 @@ except Exception as e:
 fi
 ```
 
+### MITRE ATT&CK Mapping
+```bash
+MITRE_MAPPER="$HOME/.claude/skills/jarsec/jarsec-mitre.py"
+if [ ! -f "$MITRE_MAPPER" ]; then
+  curl -sL -o "$MITRE_MAPPER" \
+    "https://raw.githubusercontent.com/tinywifi/jarsec/main/jarsec-mitre.py" 2>/dev/null || true
+fi
+if [ -f "$MITRE_MAPPER" ]; then
+  python3 "$MITRE_MAPPER" "${JARSEC_RUN}" 2>/dev/null || true
+  [ -f "${JARSEC_RUN}/mitre_summary.txt" ] && echo "MITRE: ${JARSEC_RUN}/mitre_summary.txt"
+  [ -f "${JARSEC_RUN}/mitre_techniques.json" ] && echo "MITRE JSON: ${JARSEC_RUN}/mitre_techniques.json"
+fi
+```
+
 ### IOCs
 If suspicious/malicious activity found, list:
 | Type | IOC |
@@ -717,14 +753,17 @@ fi
 echo "=== JARSEC ARTIFACTS ==="
 echo "Workspace:     ${JARSEC_RUN}"
 echo "Target:        ${TARGET_JAR}"
-echo "SHA256:        $(sha256sum '${TARGET_JAR}' | cut -d' ' -f1)"
+echo "SHA256:        $(sha256sum "${TARGET_JAR}" | cut -d' ' -f1)"
 echo "Decompiled:    ${DECOMPILED_DIR}"
 echo "Video:         ${JARSEC_RUN}/sandbox.mp4"
 echo "Filesystem:    ${JARSEC_RUN}/fs_events.log"
+echo "State diff:    ${JARSEC_RUN}/fs_before.txt → fs_after.txt"
+echo "Process diff:  ${JARSEC_RUN}/ps_before.txt → ps_after.txt"
 echo "Heap dump:     ${JARSEC_RUN}/heap.hprof"
 echo "STIX bundle:   ${JARSEC_RUN}/stix_bundle.json"
 echo "MISP event:    ${JARSEC_RUN}/misp_event.json"
 echo "YARA rule:     ${JARSEC_RUN}/yara_rule.yar"
+echo "MITRE:         ${JARSEC_RUN}/mitre_summary.txt"
 echo "Pcap:          ${PCAP_FILE}"
 echo "Decrypted:     ${JARSEC_RUN}/decrypted_strings.txt"
 echo "Extracted:     ${JARSEC_RUN}/extracted_strings.txt"
