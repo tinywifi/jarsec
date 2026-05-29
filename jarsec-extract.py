@@ -130,7 +130,7 @@ def generate_extractor(candidates: List[Tuple[str, List[str]]], output_dir: Path
         var_name = 'cls_' + class_name.replace('.', '_').replace('$', '_')
         class_loads.append(f'''
             try {{
-                Class<?> {var_name} = Class.forName("{class_name}", true, classLoader);
+                Class<?> {var_name} = Class.forName("{class_name}", false, classLoader);
                 System.out.println("--- {class_name} ---");
 ''')
         for field_name in fields:
@@ -158,11 +158,11 @@ def generate_extractor(candidates: List[Tuple[str, List[str]]], output_dir: Path
                             }}
                         }}
                     }}
-                }} catch (Exception e) {{
+                }} catch (Throwable e) {{
                     System.out.println("  {field_name}: " + e.getMessage());
                 }}
 '''
-        class_loads[-1] += '''            } catch (Exception e) {
+        class_loads[-1] += '''            } catch (Throwable e) {
                 System.err.println("Failed to load ''' + class_name + ''': " + e.getMessage());
             }
 '''
