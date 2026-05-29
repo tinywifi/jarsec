@@ -356,8 +356,8 @@ docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
     inotifywait -m -r --format '%T %w %f %e' --timefmt '%H:%M:%S' \
       /root/.minecraft /tmp /root/.config /root 2>/dev/null \
       > /tmp/recordings/fs_events.log &
-    # Start screen recording
-    ffmpeg -f x11grab -i :99 -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -movflags +faststart /tmp/recordings/sandbox.mp4 &
+    # Start screen recording (MKV = crash-safe, remuxed to MP4 later)
+    ffmpeg -f x11grab -i :99 -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p /tmp/recordings/sandbox.mkv &
     sleep 3600
   "
 ```
@@ -463,11 +463,23 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
 5. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
 5. Stop recording, extract artifacts, and dump heap:
    ```bash
-   # Gracefully stop ffmpeg
+   # Gracefully stop ffmpeg (SIGINT triggers clean MKV finalization)
+   echo "Stopping ffmpeg recorder..."
    docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" pkill -INT ffmpeg || true
-   sleep 3
+   sleep 5
+   # Remux MKV → MP4 (MP4 needs clean moov atom, MKV handles interruptions)
+   echo "Remuxing recording to MP4..."
+   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" bash -c '
+     if [ -f /tmp/recordings/sandbox.mkv ] && [ -s /tmp/recordings/sandbox.mkv ]; then
+       ffmpeg -y -i /tmp/recordings/sandbox.mkv -c copy -movflags +faststart /tmp/recordings/sandbox.mp4 2>/dev/null
+       echo "Remux OK"
+     else
+       echo "No MKV found"
+     fi
+   ' || true
    # Copy artifacts out
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mp4" "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || true
+   docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mkv" "${JARSEC_RUN}/sandbox.mkv" 2>/dev/null || true
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/fs_events.log" "${JARSEC_RUN}/fs_events.log" 2>/dev/null || true
 
    # Java heap dump — extract runtime-decrypted strings
@@ -755,7 +767,8 @@ echo "Workspace:     ${JARSEC_RUN}"
 echo "Target:        ${TARGET_JAR}"
 echo "SHA256:        $(sha256sum "${TARGET_JAR}" | cut -d' ' -f1)"
 echo "Decompiled:    ${DECOMPILED_DIR}"
-echo "Video:         ${JARSEC_RUN}/sandbox.mp4"
+echo "Video (MP4):   ${JARSEC_RUN}/sandbox.mp4"
+echo "Video (MKV):   ${JARSEC_RUN}/sandbox.mkv (fallback if MP4 corrupt)"
 echo "Filesystem:    ${JARSEC_RUN}/fs_events.log"
 echo "State diff:    ${JARSEC_RUN}/fs_before.txt → fs_after.txt"
 echo "Process diff:  ${JARSEC_RUN}/ps_before.txt → ps_after.txt"
