@@ -332,18 +332,17 @@ if ! docker pull "$SANDBOX_IMAGE" 2>/dev/null; then
   echo "Pre-built image not available, building locally..."
   docker build -t jarsec-sandbox - <<-'EOF'
 FROM eclipse-temurin:21-jdk
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pip xvfb libgl1 libgl1-mesa-dri libpulse0 libxrandr2 libxss1 libxcursor1 libxinerama1 libxi6 tcpdump tshark strace lsof net-tools iproute2 curl wget ffmpeg fonts-dejavu-core > /dev/null 2>&1 && rm -rf /var/lib/apt/lists/* && pip3 install --break-system-packages --no-cache-dir portablemc > /dev/null 2>&1 && mkdir -p /root/.minecraft/mods /tmp/recordings
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pip xvfb libgl1 libgl1-mesa-dri libpulse0 libxrandr2 libxss1 libxcursor1 libxinerama1 libxi6 tcpdump tshark strace lsof net-tools iproute2 curl wget ffmpeg fonts-dejavu-core > /dev/null 2>&1 && rm -rf /var/lib/apt/lists/* && pip3 install --break-system-packages --no-cache-dir portablemc > /dev/null 2>&1 && mkdir -p /root/.minecraft/mods
 WORKDIR /root
 EOF
   SANDBOX_IMAGE="jarsec-sandbox"
 fi
 ```
 
-### Plant Honeytokens, start recording, and monitor filesystem
+### Plant Honeytokens and monitor filesystem
 ```bash
 docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
   -v "${TARGET_JAR}:/root/.minecraft/mods/target.jar:ro" \
-  -v "${JARSEC_RUN}/recordings:/tmp/recordings" \
   -e DISPLAY=:99 \
   "$SANDBOX_IMAGE" \
   bash -c "
@@ -356,8 +355,6 @@ docker run -d --name "jarsec-sandbox-${JARSEC_RUN##*/}" \
     inotifywait -m -r --format '%T %w %f %e' --timefmt '%H:%M:%S' \
       /root/.minecraft /tmp /root/.config /root 2>/dev/null \
       > /tmp/recordings/fs_events.log &
-    # Start screen recording (MKV = crash-safe, remuxed to MP4 later)
-    ffmpeg -f x11grab -i :99 -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p /tmp/recordings/sandbox.mkv &
     sleep 3600
   "
 ```
@@ -461,45 +458,9 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
      timeout 300 portablemc start fabric:VERSION -u HoneyPlayer -i 00000000-0000-0000-0000-000000000001
    ```
 5. If Java spawns, monitor with `docker exec` commands for lsof/jstack.
-5. Stop recording, extract artifacts, and dump heap:
+5. Stop container and extract artifacts:
    ```bash
-   # Gracefully stop ffmpeg (SIGINT triggers clean MKV finalization)
-   echo "Stopping ffmpeg recorder..."
-   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" pkill -INT ffmpeg || true
-   sleep 5
-   # Remux MKV → MP4 (MP4 needs clean moov atom, MKV handles interruptions)
-   echo "Remuxing recording to MP4..."
-   docker exec "jarsec-sandbox-${JARSEC_RUN##*/}" bash -c '
-     if [ -f /tmp/recordings/sandbox.mkv ] && [ -s /tmp/recordings/sandbox.mkv ]; then
-       ffmpeg -y -i /tmp/recordings/sandbox.mkv -c copy -movflags +faststart /tmp/recordings/sandbox.mp4 2>/dev/null
-       echo "Remux OK"
-     else
-       echo "No MKV found"
-     fi
-   ' || true
-   # Copy artifacts out
-   docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mp4" "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || true
-   docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mkv" "${JARSEC_RUN}/sandbox.mkv" 2>/dev/null || true
-
-   # Validate recording — if MP4 is missing/corrupt, use MKV
-   if [ -f "${JARSEC_RUN}/sandbox.mp4" ]; then
-     MP4_SIZE=$(wc -c < "${JARSEC_RUN}/sandbox.mp4")
-     if [ "$MP4_SIZE" -lt 1024 ]; then
-       echo "⚠️ MP4 too small (${MP4_SIZE} bytes), using MKV fallback"
-       rm -f "${JARSEC_RUN}/sandbox.mp4"
-     else
-       # Quick ffprobe validation
-       if ! ffprobe -v error "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null; then
-         echo "⚠️ MP4 corrupt (ffprobe failed), using MKV fallback"
-         rm -f "${JARSEC_RUN}/sandbox.mp4"
-       else
-         echo "✓ MP4 valid: ${MP4_SIZE} bytes"
-       fi
-     fi
-   fi
-   if [ ! -f "${JARSEC_RUN}/sandbox.mp4" ] && [ -f "${JARSEC_RUN}/sandbox.mkv" ]; then
-     echo "Using MKV fallback: ${JARSEC_RUN}/sandbox.mkv"
-   fi
+   # Copy filesystem events out
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/fs_events.log" "${JARSEC_RUN}/fs_events.log" 2>/dev/null || true
 
    # Java heap dump — extract runtime-decrypted strings
@@ -665,7 +626,6 @@ while IFS= read -r url; do
 
         docker run --rm --name "jarsec-stage2-${S2_RUN##*/}" \
           -v "$S2_TARGET:/payload.jar:ro" \
-          -v "${JARSEC_RUN}/recordings:/tmp/recordings" \
           -e DISPLAY=:99 \
           "$SANDBOX_IMAGE" \
           timeout 60 java -jar /payload.jar 2>/dev/null || echo "  Standalone execution failed (expected for library JARs)"
@@ -751,7 +711,6 @@ If suspicious/malicious activity found, list:
 | Stage-2 | URLs, SHA256s, and verdicts of secondary payloads |
 | Heap Strings | Runtime-decrypted strings extracted from heap dump |
 | Filesystem | Files created/modified/deleted inside sandbox |
-| Video | Screen recording of sandbox execution |
 
 ### Generate STIX/MISP IOC Export
 ```bash
@@ -787,8 +746,6 @@ echo "Workspace:     ${JARSEC_RUN}"
 echo "Target:        ${TARGET_JAR}"
 echo "SHA256:        $(sha256sum "${TARGET_JAR}" | cut -d' ' -f1)"
 echo "Decompiled:    ${DECOMPILED_DIR}"
-echo "Video (MP4):   ${JARSEC_RUN}/sandbox.mp4"
-echo "Video (MKV):   ${JARSEC_RUN}/sandbox.mkv (fallback if MP4 corrupt)"
 echo "Filesystem:    ${JARSEC_RUN}/fs_events.log"
 echo "State diff:    ${JARSEC_RUN}/fs_before.txt → fs_after.txt"
 echo "Process diff:  ${JARSEC_RUN}/ps_before.txt → ps_after.txt"

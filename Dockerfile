@@ -1,7 +1,7 @@
 FROM eclipse-temurin:21-jdk
 
 LABEL org.opencontainers.image.source="https://github.com/tinywifi/jarsec"
-LABEL org.opencontainers.image.description="Jarsec malware analysis sandbox with Minecraft, video recording, and network capture"
+LABEL org.opencontainers.image.description="Jarsec malware analysis sandbox with filesystem monitoring, heap dump, and network capture"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install everything in one RUN to minimize layers
@@ -26,7 +26,6 @@ RUN apt-get update -qq \
         iproute2 \
         curl \
         wget \
-        ffmpeg \
         fonts-dejavu-core \
         inotify-tools \
     && rm -rf /var/lib/apt/lists/* \
