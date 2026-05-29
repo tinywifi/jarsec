@@ -480,6 +480,26 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
    # Copy artifacts out
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mp4" "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null || true
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/sandbox.mkv" "${JARSEC_RUN}/sandbox.mkv" 2>/dev/null || true
+
+   # Validate recording — if MP4 is missing/corrupt, use MKV
+   if [ -f "${JARSEC_RUN}/sandbox.mp4" ]; then
+     MP4_SIZE=$(wc -c < "${JARSEC_RUN}/sandbox.mp4")
+     if [ "$MP4_SIZE" -lt 1024 ]; then
+       echo "⚠️ MP4 too small (${MP4_SIZE} bytes), using MKV fallback"
+       rm -f "${JARSEC_RUN}/sandbox.mp4"
+     else
+       # Quick ffprobe validation
+       if ! ffprobe -v error "${JARSEC_RUN}/sandbox.mp4" 2>/dev/null; then
+         echo "⚠️ MP4 corrupt (ffprobe failed), using MKV fallback"
+         rm -f "${JARSEC_RUN}/sandbox.mp4"
+       else
+         echo "✓ MP4 valid: ${MP4_SIZE} bytes"
+       fi
+     fi
+   fi
+   if [ ! -f "${JARSEC_RUN}/sandbox.mp4" ] && [ -f "${JARSEC_RUN}/sandbox.mkv" ]; then
+     echo "Using MKV fallback: ${JARSEC_RUN}/sandbox.mkv"
+   fi
    docker cp "jarsec-sandbox-${JARSEC_RUN##*/}:/tmp/recordings/fs_events.log" "${JARSEC_RUN}/fs_events.log" 2>/dev/null || true
 
    # Java heap dump — extract runtime-decrypted strings
