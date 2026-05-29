@@ -185,6 +185,34 @@ else
 fi
 ```
 
+### Run dynamic string extractor (caller-context obfuscation)
+
+> For obfuscators like zPdoG.rn() that use `StackWalker.getCallerClass().getName().hashCode()` as part of
+the key, static brute-force can't reverse the algorithm. Instead, load the actual class via reflection —
+the static initializer (`<clinit>`) decrypts strings with the correct caller context automatically.
+
+```bash
+# Ensure extractor is available (auto-download from repo if missing)
+EXTRACTOR="$HOME/.claude/skills/jarsec/jarsec-extract.py"
+if [ ! -f "$EXTRACTOR" ]; then
+  curl -sL -o "$EXTRACTOR" \
+    "https://raw.githubusercontent.com/tinywifi/jarsec/main/jarsec-extract.py" 2>/dev/null || true
+fi
+
+if [ -f "$EXTRACTOR" ] && [ -d "${DECOMPILED_DIR}" ]; then
+  echo "Running dynamic string extractor..."
+  python3 "$EXTRACTOR" "${TARGET_JAR}" "${DECOMPILED_DIR}" > "${JARSEC_RUN}/extracted_strings.txt" 2> "${JARSEC_RUN}/extractor_errors.log" || true
+  if [ -s "${JARSEC_RUN}/extracted_strings.txt" ]; then
+    echo "=== EXTRACTED STRINGS (via reflection) ==="
+    grep -E "^  \[|^  [A-Za-z]|^---" "${JARSEC_RUN}/extracted_strings.txt" | head -60
+    echo "--- Full output: ${JARSEC_RUN}/extracted_strings.txt ---"
+  fi
+else
+  echo "⚠️ jarsec-extract.py not found or no decompiled source."
+fi
+```
+```
+
 **If target is SOURCE CODE folder:** Skip decompilation. Set `${DECOMPILED_DIR}` to the source folder path.
 
 ## Step 3: Static Analysis (4 Agents in Parallel)
@@ -210,7 +238,7 @@ fi
    - Look for method signatures: `ProcessBuilder`, `HttpClient`, `Socket`, `URLClassLoader`, `defineClass`
 6. Extract author info. Distinguish edgy branding from malicious signatures.
 7. Report which decompiler was used (Vineflower / CFR / none) and how many `.java` files were produced.
-8. If decrypted strings are available (`${JARSEC_RUN}/decrypted_strings.txt`), summarize key findings.
+8. If decrypted/extracted strings are available (`${JARSEC_RUN}/decrypted_strings.txt`, `${JARSEC_RUN}/extracted_strings.txt`), summarize key findings — especially C2 URLs, webhooks, tokens.
 
 ### Agent 2 — Bytecode & Threat Analyst
 **Work on `${DECOMPILED_DIR}` (decompiled Java source). If decompilation failed, fall back to `${EXTRACTED_DIR}` (raw bytecode).**
