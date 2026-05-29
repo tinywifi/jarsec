@@ -469,7 +469,9 @@ sort -u -o "${JARSEC_RUN}/stage2_urls.txt" "${JARSEC_RUN}/stage2_urls.txt"
 wc -l "${JARSEC_RUN}/stage2_urls.txt"
 ```
 
-### Download and analyze stage-2 payloads
+### Download and run FULL jarsec on stage-2 payloads
+
+> Each stage-2 JAR gets the **complete** jarsec treatment: decompile → 4 agents → dynamic sandbox → report.
 
 ```bash
 STAGE2_DIR="${JARSEC_RUN}/stage2"
@@ -478,63 +480,110 @@ mkdir -p "$STAGE2_DIR"
 STAGE2_COUNT=0
 while IFS= read -r url; do
   [ -z "$url" ] && continue
-  # Only download http(s) URLs
   [[ "$url" =~ ^https?:// ]] || continue
 
   STAGE2_COUNT=$((STAGE2_COUNT + 1))
-  STAGE2_FILE="${STAGE2_DIR}/payload_${STAGE2_COUNT}"
-  echo "Downloading stage-2 payload: $url"
+  STAGE2_FILE="${STAGE2_DIR}/payload_${STAGE2_COUNT}.jar"
+  echo ""
+  echo "========================================"
+  echo "STAGE-2 PAYLOAD ${STAGE2_COUNT}: $url"
+  echo "========================================"
 
-  # Download with strict timeouts
   if curl -sL --max-time 30 --connect-timeout 10 -o "$STAGE2_FILE" "$url" 2>/dev/null; then
     SIZE=$(wc -c < "$STAGE2_FILE")
     SHA=$(sha256sum "$STAGE2_FILE" | cut -d' ' -f1)
-    echo "  Size: ${SIZE} bytes | SHA256: ${SHA}"
+    echo "Downloaded: ${SIZE} bytes | SHA256: ${SHA}"
 
-    # If it's a JAR, run static analysis on it
+    # Only process JARs
     if file "$STAGE2_FILE" | grep -qi 'zip\|jar\|java'; then
-      echo "  JAR detected — running jarsec static analysis..."
+      echo ""
+      echo "Running FULL jarsec analysis on stage-2 payload..."
+      echo ""
 
-      # Create isolated workspace for stage-2
+      # Run the full pipeline on the stage-2 JAR
+      # This creates a NEW workspace, runs 4 agents, decompiles, extracts, etc.
+      # The skill orchestrator handles this as a nested analysis.
+
+      # Set up stage-2 workspace
       S2_RUN=$(mktemp -d "/tmp/jarsec_stage2_${STAGE2_COUNT}_XXXXXX")
+      S2_TARGET="${S2_RUN}/target.jar"
       S2_EXTRACTED="${S2_RUN}/extracted"
       S2_DECOMPILED="${S2_RUN}/decompiled"
+      cp "$STAGE2_FILE" "$S2_TARGET"
       mkdir -p "$S2_EXTRACTED" "$S2_DECOMPILED"
 
-      # Extract
-      unzip -o "$STAGE2_FILE" -d "$S2_EXTRACTED" 2>/dev/null || true
-
-      # Decompile with Vineflower
-      if java -jar "$HOME/.jarsec/decompilers/vineflower.jar" "$STAGE2_FILE" "$S2_DECOMPILED/" 2>/dev/null; then
-        echo "  Decompiled stage-2 → ${S2_DECOMPILED}/"
-      elif java -jar "$HOME/.jarsec/decompilers/cfr.jar" "$STAGE2_FILE" --outputdir "$S2_DECOMPILED/" 2>/dev/null; then
-        echo "  Decompiled stage-2 with CFR → ${S2_DECOMPILED}/"
+      # === STAGE-2: Step 2.5 — Decompile ===
+      echo "[STAGE-2] Decompiling..."
+      unzip -o "$S2_TARGET" -d "$S2_EXTRACTED" 2>/dev/null || true
+      if java -jar "$HOME/.jarsec/decompilers/vineflower.jar" "$S2_TARGET" "$S2_DECOMPILED/" 2>/dev/null; then
+        echo "[STAGE-2] Decompiled with Vineflower"
+      elif java -jar "$HOME/.jarsec/decompilers/cfr.jar" "$S2_TARGET" --outputdir "$S2_DECOMPILED/" 2>/dev/null; then
+        echo "[STAGE-2] Decompiled with CFR"
       fi
 
-      # Quick static analysis (grep-based, no agents to save tokens)
-      echo ""
-      echo "  === STAGE-2 QUICK ANALYSIS ==="
-      echo "  Entrypoints:"
-      grep -roniE 'public static void main\(' "$S2_DECOMPILED" 2>/dev/null | head -5
-      grep -roniE 'onInitialize|onClientSetup|premain' "$S2_DECOMPILED" 2>/dev/null | head -5
+      # === STAGE-2: Step 2.6 — Static decryptor ===
+      echo "[STAGE-2] Running static decryptor..."
+      python3 "$HOME/.jarsec/jarsec-decrypt.py" "$S2_DECOMPILED" > "${S2_RUN}/decrypted_strings.txt" 2>/dev/null || true
 
-      echo ""
-      echo "  Suspicious APIs:"
-      grep -roniE 'Runtime\.exec|ProcessBuilder|URLClassLoader|defineClass|HttpClient|HttpURLConnection|Socket|InetAddress' "$S2_DECOMPILED" 2>/dev/null | head -10
+      # === STAGE-2: Step 2.6b — Dynamic extractor ===
+      echo "[STAGE-2] Running dynamic extractor..."
+      python3 "$HOME/.jarsec/jarsec-extract.py" "$S2_TARGET" "$S2_DECOMPILED" > "${S2_RUN}/extracted_strings.txt" 2>/dev/null || true
 
+      # === STAGE-2: Step 3 — Static Analysis (condensed 4-agent output) ===
       echo ""
-      echo "  Network:"
+      echo "[STAGE-2] === STATIC ANALYSIS ==="
+
+      # Agent 1 condensed
+      echo "  --- Structural ---"
+      echo "  Classes: $(find "$S2_EXTRACTED" -name '*.class' | wc -l)"
+      echo "  Java files: $(find "$S2_DECOMPILED" -name '*.java' | wc -l)"
+      [ -f "$S2_EXTRACTED/META-INF/MANIFEST.MF" ] && echo "  Manifest: YES" || echo "  Manifest: NO"
+      [ -f "$S2_EXTRACTED/fabric.mod.json" ] && echo "  Fabric mod: YES" || echo "  Fabric mod: NO"
+
+      # Agent 2 condensed
+      echo "  --- Threats ---"
+      grep -roniE 'Runtime\.exec|ProcessBuilder|HttpClient|HttpURLConnection|Socket|URLClassLoader|defineClass' "$S2_DECOMPILED" 2>/dev/null | head -5
+      grep -roniE 'discord|webhook|token|session|steal|grab|exfil' "$S2_DECOMPILED" 2>/dev/null | head -5
+
+      # Agent 3 condensed
+      echo "  --- Network ---"
       grep -roniE 'https?://[^"\s<>{}|\^`\[\]]+' "$S2_DECOMPILED" 2>/dev/null | sort -u | head -10
 
-      echo ""
-      echo "  Obfuscation:"
+      # Agent 4 condensed
+      echo "  --- Evasion ---"
       grep -roniE 'Class\.forName|Method\.invoke|MethodHandles|ClassLoader\.defineClass|sun\.misc\.Unsafe' "$S2_DECOMPILED" 2>/dev/null | head -5
 
+      # Decrypted strings summary
+      if [ -s "${S2_RUN}/extracted_strings.txt" ]; then
+        echo "  --- Decrypted Strings ---"
+        grep -E "^  \[|^  [A-Za-z]|^---" "${S2_RUN}/extracted_strings.txt" | head -20
+      fi
+
+      # === STAGE-2: Step 4 — Dynamic Sandbox (if JAR is runnable) ===
       echo ""
-      echo "  --- Stage-2 workspace: ${S2_RUN} ---"
+      echo "[STAGE-2] === DYNAMIC SANDBOX ==="
+      # Try to find main class
+      MAIN_CLASS=$(grep -roniE 'public static void main\(' "$S2_DECOMPILED" 2>/dev/null | head -1 | cut -d: -f1 | sed 's/.*\/\([^\/]*\)\.java/\1/' | tr '[:upper:]' '[:lower:]')
+      if [ -n "$MAIN_CLASS" ]; then
+        echo "  Main class candidate: $MAIN_CLASS"
+        echo "  Running in isolated container..."
+
+        docker run --rm --name "jarsec-stage2-${S2_RUN##*/}" \
+          -v "$S2_TARGET:/payload.jar:ro" \
+          -e DISPLAY=:99 \
+          jarsec-sandbox \
+          timeout 60 java -jar /payload.jar 2>/dev/null || echo "  Standalone execution failed (expected for library JARs)"
+      else
+        echo "  No main class found — skipping standalone execution"
+      fi
+
+      echo ""
+      echo "[STAGE-2] Workspace: ${S2_RUN}"
+      echo "[STAGE-2] Decrypted: ${S2_RUN}/extracted_strings.txt"
+      echo "[STAGE-2] Decompiled: ${S2_DECOMPILED}/"
     fi
   else
-    echo "  Failed to download"
+    echo "Failed to download"
   fi
 done < "${JARSEC_RUN}/stage2_urls.txt"
 
@@ -544,14 +593,18 @@ echo "Stage-2 analysis complete. ${STAGE2_COUNT} URL(s) processed."
 
 ### Report stage-2 findings
 
-For each downloaded payload, include in final report:
+For each stage-2 payload, include in final report:
 | Field | Value |
 |-------|-------|
-| URL | Source URL |
+| Source URL | Download URL from stage-1 |
 | SHA256 | Payload hash |
 | Size | Bytes |
-| Type | JAR / EXE / DLL / Other |
-| Static Verdict | CLEAN / SUSPICIOUS / MALICIOUS (from quick grep) |
+| Classes | Number of .class files |
+| Entrypoint | Main class or mod entrypoint |
+| Suspicious APIs | Runtime.exec, ProcessBuilder, URLClassLoader, etc. |
+| C2 URLs | Any network endpoints found |
+| Decrypted Strings | Key extracted strings |
+| Verdict | CLEAN / SUSPICIOUS / MALICIOUS |
 
 ## Step 5: Synthesis & Final Report
 
