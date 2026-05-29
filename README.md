@@ -11,7 +11,10 @@ npx skills add https://github.com/tinywifi/jarsec
 ## What you need
 
 - **Docker** (required - the mod never runs on your actual machine)
-- Optional extras: `openjdk-21-jdk`, `unzip`, `tcpdump`, `tshark`, `strace`, `python3-pip`
+- **Java** (required for decompilation - `openjdk-21-jdk` or any JDK 17+)
+- Optional extras: `unzip`, `tcpdump`, `tshark`, `strace`, `python3-pip`
+
+Decompilers (Vineflower + CFR fallback) are downloaded automatically on first run.
 
 Jarsec will check what you have installed and tell you exactly what's missing.
 
@@ -38,6 +41,7 @@ claude
 ## What it actually checks
 
 **Static analysis (4 agents running in parallel):**
+- Decompiles JAR bytecode to readable Java source via Vineflower (falls back to CFR)
 - Build configuration for malicious repos, shadow jars, or obfuscation
 - Infostealer signatures (Discord webhooks, token grabbers, session theft)
 - Known Weedhack/majanito malware IOCs
@@ -61,11 +65,12 @@ claude
 
 1. Figures out what you gave it (URL, file path, or current directory)
 2. Checks that Docker is installed
-3. Spawns 4 static analysis agents in parallel
-4. If it's source code, builds the mod first
-5. Spins up a throwaway Docker container and runs the mod inside it
-6. Watches everything the mod tries to do
-7. Gives you a report with a single word verdict: **CLEAN**, **SUSPICIOUS**, or **MALICIOUS**
+3. Decompiles JARs to Java source with Vineflower (CFR fallback)
+4. Spawns 4 static analysis agents in parallel
+5. If it's source code, builds the mod first
+6. Spins up a throwaway Docker container and runs the mod inside it
+7. Watches everything the mod tries to do
+8. Gives you a report with a single word verdict: **CLEAN**, **SUSPICIOUS**, or **MALICIOUS**
 
 ## Safety
 

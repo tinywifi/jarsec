@@ -58,6 +58,9 @@ which python3 2>/dev/null && python3 --version 2>/dev/null || echo "PYTHON3: NOT
 which pip3 2>/dev/null || echo "PIP3: NOT INSTALLED"
 ```
 
+**Decompilers (auto-downloaded if missing):**
+> Vineflower and CFR are downloaded automatically on first run. Vineflower is preferred; CFR is the fallback if Vineflower chokes on obfuscated bytecode.
+
 **If Docker is missing:**
 > 🚨 **Docker is REQUIRED** for Jarsec's dynamic sandbox. The suspicious mod MUST be detonated inside an isolated container.
 >
@@ -76,9 +79,77 @@ give them install commands: `sudo apt-get install -y openjdk-21-jdk unzip xvfb t
    - If Agent 1 flags **SUSPICIOUS** or **FAIL** → **ABORT immediately**.
    - If Agent 1 marks **PASS** → fix CRLF (`sed -i 's/\r$//' gradlew`), attempt `./gradlew build`, then use the built JAR for dynamic analysis.
 
+## Step 2.5: Decompile JAR (JAR targets only)
+
+If the target is a **JAR file**, decompile the bytecode before spawning analysis agents. This gives the static analysis agents readable Java source instead of raw `.class` files.
+
+### Download decompilers (auto-download on first run)
+
+```bash
+mkdir -p "$HOME/.jarsec/decompilers"
+
+# Vineflower (primary)
+if [ ! -f "$HOME/.jarsec/decompilers/vineflower.jar" ]; then
+  echo "Downloading Vineflower..."
+  LATEST_VF=$(curl -s https://api.github.com/repos/Vineflower/vineflower/releases/latest | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4)
+  curl -sL -o "$HOME/.jarsec/decompilers/vineflower.jar" \
+    "https://github.com/Vineflower/vineflower/releases/download/${LATEST_VF}/vineflower-${LATEST_VF}.jar" \
+    || curl -sL -o "$HOME/.jarsec/decompilers/vineflower.jar" \
+    "https://github.com/Vineflower/vineflower/releases/download/1.12.0/vineflower-1.12.0.jar"
+fi
+
+# CFR (fallback)
+if [ ! -f "$HOME/.jarsec/decompilers/cfr.jar" ]; then
+  echo "Downloading CFR..."
+  LATEST_CFR=$(curl -s https://api.github.com/repos/leibnitz27/cfr/releases/latest | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4)
+  curl -sL -o "$HOME/.jarsec/decompilers/cfr.jar" \
+    "https://github.com/leibnitz27/cfr/releases/download/${LATEST_CFR}/cfr-${LATEST_CFR}.jar" \
+    || curl -sL -o "$HOME/.jarsec/decompilers/cfr.jar" \
+    "https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar"
+fi
+```
+
+### Extract and decompile
+
+```bash
+# Extract raw JAR contents for structural analysis
+mkdir -p /tmp/jarsec_extracted
+unzip -o /tmp/jarsec_target.jar -d /tmp/jarsec_extracted
+
+# Decompile to readable Java source
+mkdir -p /tmp/jarsec_decompiled
+
+# Try Vineflower first
+if java -jar "$HOME/.jarsec/decompilers/vineflower.jar" /tmp/jarsec_target.jar /tmp/jarsec_decompiled/ 2>/tmp/jarsec_vf_err; then
+  echo "Decompiled with Vineflower → /tmp/jarsec_decompiled/"
+  DECOMPILER="vineflower"
+# Fall back to CFR
+elif java -jar "$HOME/.jarsec/decompilers/cfr.jar" /tmp/jarsec_target.jar --outputdir /tmp/jarsec_decompiled/ 2>/tmp/jarsec_cfr_err; then
+  echo "Decompiled with CFR (fallback) → /tmp/jarsec_decompiled/"
+  DECOMPILER="cfr"
+else
+  echo "⚠️ Both decompilers failed. Agents will analyze raw bytecode."
+  DECOMPILER="none"
+fi
+
+# Verify decompilation produced files
+find /tmp/jarsec_decompiled/ -type f | wc -l
+```
+
+### Directory layout for agents
+
+| Path | Contents | Used by |
+|------|----------|---------|
+| `/tmp/jarsec_extracted/` | Raw JAR contents (`.class`, `META-INF/`, configs) | Agent 1 (structural), fallback |
+| `/tmp/jarsec_decompiled/` | Decompiled `.java` source files | Agents 2-4 (code analysis) |
+
+**If target is SOURCE CODE folder:** Skip decompilation. Set `/tmp/jarsec_decompiled/` to the source folder path.
+
 ## Step 3: Static Analysis (4 Agents in Parallel)
 
 ### Agent 1 — Structural & Build Analyst
+**Work on `/tmp/jarsec_extracted/` for structural analysis. Reference `/tmp/jarsec_decompiled/` for class counts and package structure.**
+
 1. Compute SHA256/MD5 of target files. Verify ZIP/JAR magic.
 2. Map archive/source tree. List classes, mixins, assets, configs. Check `META-INF/MANIFEST.MF`.
 3. Deeply inspect `build.gradle.kts`, `settings.gradle.kts`, `pom.xml`. Look for malicious repos, unauthorized buildscript deps, `exec`/`commandLine`/`ProcessBuilder` tasks, Shadow/FatJar abuse, hidden obfuscation.
@@ -89,8 +160,11 @@ give them install commands: `sudo apt-get install -y openjdk-21-jdk unzip xvfb t
 5. Read `fabric.mod.json`, `mods.toml`, `plugin.yml`. Extract MC version, loader, deps, entrypoints. **Pipe metadata to Dynamic Sandbox.**
 6. Extract author info. Distinguish edgy branding from malicious signatures.
 7. Scan `.png`, `.ogg`, `.json` for anomalous sizes, trailing EOF data, high-entropy buffers.
+8. Report which decompiler was used (Vineflower / CFR / none) and how many `.java` files were produced.
 
 ### Agent 2 — Bytecode & Threat Analyst
+**Work on `/tmp/jarsec_decompiled/` (decompiled Java source). If decompilation failed, fall back to `/tmp/jarsec_extracted/` (raw bytecode).**
+
 1. Search for infostealer keywords: `discord`, `webhook`, `token`, `session`, `steal`, `grab`, `exfil`, `rat`, `powershell`, `cmd.exe`.
 2. Weedhack scan:
    - Packages: `me.mclauncher.*`, `dev.majanito.*`
@@ -102,6 +176,8 @@ give them install commands: `sudo apt-get install -y openjdk-21-jdk unzip xvfb t
 7. Log scrubbing: `System.setOut`, `System.setErr`, Log4j filter injection.
 
 ### Agent 3 — Network & Engine Analyst
+**Work on `/tmp/jarsec_decompiled/` (decompiled Java source). If decompilation failed, fall back to `/tmp/jarsec_extracted/` (raw bytecode).**
+
 1. Extract hardcoded URLs, IPs, Discord webhooks, base64 endpoints. Flag Weedhack domains: `receiver.cy`, `weedhack.cy`.
 2. Alternative C2: Telegram (`api.telegram.org`), Ethereum (`0xce6d41de`, RSA key `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtmNzDf...`).
 3. Mixin review: List all SpongePowered mixins. Flag mixins intercepting `ClientPacketListener`, auth packets, `GameRenderer`, `LevelRenderer` without clear gameplay purpose.
@@ -109,30 +185,31 @@ give them install commands: `sudo apt-get install -y openjdk-21-jdk unzip xvfb t
 
 ### Agent 4 — Evasion & Obfuscation Analyst
 > ⚠️ **MUST complete in under 2 minutes.** Use ONLY batch recursive `grep -r`. **NEVER check files individually.**
+> **Work on `/tmp/jarsec_decompiled/` (decompiled Java source). If decompilation failed, use `/tmp/jarsec_extracted/` (raw bytecode).**
 
-Run these 7 commands against the target source tree:
+Run these 7 commands against `/tmp/jarsec_decompiled/`:
 
 ```bash
 # 1. Known malware/obfuscation signatures
-grep -rniE 'weedhack|jnic|protector|packer|obfusc|stub|dev\.jnic|BSOMwJ|fwcMeR|lXpXvp|\bα\b|\bβ\b' /TARGET/ 2>/dev/null | head -30
+grep -rniE 'weedhack|jnic|protector|packer|obfusc|stub|dev\.jnic|BSOMwJ|fwcMeR|lXpXvp|\bα\b|\bβ\b' /tmp/jarsec_decompiled/ 2>/dev/null | head -30
 
 # 2. Reflection & dynamic execution
-grep -rniE 'Class\.forName|Method\.invoke|MethodHandles|java\.lang\.reflect|ClassLoader\.defineClass' /TARGET/ 2>/dev/null | head -30
+grep -rniE 'Class\.forName|Method\.invoke|MethodHandles|java\.lang\.reflect|ClassLoader\.defineClass' /tmp/jarsec_decompiled/ 2>/dev/null | head -30
 
 # 3. Native/JNI/JVM abuse
-grep -rniE 'sun\.misc\.Unsafe|Instrumentation|VirtualMachine|System\.loadLibrary|System\.load|\bJNI\b|\bJNA\b' /TARGET/ 2>/dev/null | head -30
+grep -rniE 'sun\.misc\.Unsafe|Instrumentation|VirtualMachine|System\.loadLibrary|System\.load|\bJNI\b|\bJNA\b' /tmp/jarsec_decompiled/ 2>/dev/null | head -30
 
 # 4. Anti-sandbox
-grep -rniE 'availableProcessors|getProcessorCount|totalMemory|getMacAddress|Xvfb|docker|vmware|virtualbox|Add-MpPreference' /TARGET/ 2>/dev/null | head -30
+grep -rniE 'availableProcessors|getProcessorCount|totalMemory|getMacAddress|Xvfb|docker|vmware|virtualbox|Add-MpPreference' /tmp/jarsec_decompiled/ 2>/dev/null | head -30
 
 # 5. High-entropy payloads
-grep -rniE 'byte\[[[:space:]]*\][[:space:]]*\{[[:space:]]*0x[0-9a-fA-F]{2}' /TARGET/ 2>/dev/null | head -20
+grep -rniE 'byte\[[[:space:]]*\][[:space:]]*\{[[:space:]]*0x[0-9a-fA-F]{2}' /tmp/jarsec_decompiled/ 2>/dev/null | head -20
 
 # 6. Steganographic decoding
-grep -rniE 'ImageIO|BufferedImage|AudioInputStream|getRGB|getPixel|getData' /TARGET/ 2>/dev/null | head -20
+grep -rniE 'ImageIO|BufferedImage|AudioInputStream|getRGB|getPixel|getData' /tmp/jarsec_decompiled/ 2>/dev/null | head -20
 
 # 7. Log scrubbing
-grep -rniE 'System\.setOut|System\.setErr|System\.setIn|AppenderRef|ThresholdFilter' /TARGET/ 2>/dev/null | head -20
+grep -rniE 'System\.setOut|System\.setErr|System\.setIn|AppenderRef|ThresholdFilter' /tmp/jarsec_decompiled/ 2>/dev/null | head -20
 ```
 
 For each: report `NO MATCHES` or list `file:line: context` with assessment.
