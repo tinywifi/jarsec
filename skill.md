@@ -249,7 +249,9 @@ fi
    - Strings: `initializeWeedhack`, `WeedhackFile`, `$jnicLoader`, `JavaSecurityUpdater`, `KeyLoggingHandler`, `WebcamShareHandler`, `cfg.json`, `SecurityInfo.json`, `Updater.vbs`
 3. Malicious APIs: `Runtime.exec`, `ProcessBuilder`, `URL`, `HttpURLConnection`, `Socket`, `HttpClient`, `InetAddress`, `System.getenv`, `Clipboard`.
 4. Persistence: `launcher_profiles.json`, `launcher_accounts.json`, `-javaagent`, autostart, registry `Run`, `schtasks`.
-5. Stage-2 droppers: `os.name`, `/tmp`, `%TEMP%`, `%APPDATA%`, `Files.write`, `FileOutputStream`, `URLClassLoader`.
+5. Stage-2 droppers: `os.name`, `/tmp`, `%TEMP%`, `%APPDATA%`, `Files.write`, `FileOutputStream`, `URLClassLoader`, `defineClass`.
+   - **Flag for stage-2 analysis** if `URLClassLoader` + `defineClass` found together
+   - Extract download URLs from decrypted strings and decompiled source
 6. Viral propagation: `ZipInputStream`, `JarFile`, disk iteration for `.jar`/`.zip`.
 7. Log scrubbing: `System.setOut`, `System.setErr`, Log4j filter injection.
 
@@ -444,9 +446,116 @@ docker cp "${JARSEC_RUN}/deps/"*.jar "jarsec-sandbox-${JARSEC_RUN##*/}:/root/.mi
    rm -rf "${JARSEC_RUN}"
    ```
 
+## Step 4.5: Stage-2 Payload Analysis (if found)
+
+If Agent 2 or dynamic sandbox flagged **stage-2 droppers** (`URLClassLoader`, `defineClass`, `BOVhZh.AKH()`, etc.), automatically hunt and analyze the secondary payload.
+
+### Extract stage-2 download URLs
+
+```bash
+# From decrypted/extracted strings
+grep -oiE 'https?://[^"\s<>{}|\^`\[\]]+\.(jar|zip|class|dat|bin)' "${JARSEC_RUN}/decrypted_strings.txt" "${JARSEC_RUN}/extracted_strings.txt" 2>/dev/null | sort -u > "${JARSEC_RUN}/stage2_urls.txt"
+
+# From decompiled source (additional URL patterns)
+grep -roniE 'https?://[^"\s<>{}|\^`\[\]]+' "${DECOMPILED_DIR}" 2>/dev/null | grep -iE '\.(jar|zip|dat|bin|exe|dll|so)$' | sort -u >> "${JARSEC_RUN}/stage2_urls.txt"
+
+# From pcap (if tcpdump captured anything)
+if [ -f "${PCAP_FILE}" ]; then
+  tshark -r "${PCAP_FILE}" -Y "http.request or tls.handshake" -T fields -e http.host -e tls.handshake.extensions_server_name 2>/dev/null | tr ',' '\n' | grep -viE 'ubuntu|cloudflare|kimi|modrinth|fabricmc|minecraft' | sort -u >> "${JARSEC_RUN}/stage2_urls.txt" || true
+fi
+
+# Deduplicate
+sort -u -o "${JARSEC_RUN}/stage2_urls.txt" "${JARSEC_RUN}/stage2_urls.txt"
+wc -l "${JARSEC_RUN}/stage2_urls.txt"
+```
+
+### Download and analyze stage-2 payloads
+
+```bash
+STAGE2_DIR="${JARSEC_RUN}/stage2"
+mkdir -p "$STAGE2_DIR"
+
+STAGE2_COUNT=0
+while IFS= read -r url; do
+  [ -z "$url" ] && continue
+  # Only download http(s) URLs
+  [[ "$url" =~ ^https?:// ]] || continue
+
+  STAGE2_COUNT=$((STAGE2_COUNT + 1))
+  STAGE2_FILE="${STAGE2_DIR}/payload_${STAGE2_COUNT}"
+  echo "Downloading stage-2 payload: $url"
+
+  # Download with strict timeouts
+  if curl -sL --max-time 30 --connect-timeout 10 -o "$STAGE2_FILE" "$url" 2>/dev/null; then
+    SIZE=$(wc -c < "$STAGE2_FILE")
+    SHA=$(sha256sum "$STAGE2_FILE" | cut -d' ' -f1)
+    echo "  Size: ${SIZE} bytes | SHA256: ${SHA}"
+
+    # If it's a JAR, run static analysis on it
+    if file "$STAGE2_FILE" | grep -qi 'zip\|jar\|java'; then
+      echo "  JAR detected — running jarsec static analysis..."
+
+      # Create isolated workspace for stage-2
+      S2_RUN=$(mktemp -d "/tmp/jarsec_stage2_${STAGE2_COUNT}_XXXXXX")
+      S2_EXTRACTED="${S2_RUN}/extracted"
+      S2_DECOMPILED="${S2_RUN}/decompiled"
+      mkdir -p "$S2_EXTRACTED" "$S2_DECOMPILED"
+
+      # Extract
+      unzip -o "$STAGE2_FILE" -d "$S2_EXTRACTED" 2>/dev/null || true
+
+      # Decompile with Vineflower
+      if java -jar "$HOME/.jarsec/decompilers/vineflower.jar" "$STAGE2_FILE" "$S2_DECOMPILED/" 2>/dev/null; then
+        echo "  Decompiled stage-2 → ${S2_DECOMPILED}/"
+      elif java -jar "$HOME/.jarsec/decompilers/cfr.jar" "$STAGE2_FILE" --outputdir "$S2_DECOMPILED/" 2>/dev/null; then
+        echo "  Decompiled stage-2 with CFR → ${S2_DECOMPILED}/"
+      fi
+
+      # Quick static analysis (grep-based, no agents to save tokens)
+      echo ""
+      echo "  === STAGE-2 QUICK ANALYSIS ==="
+      echo "  Entrypoints:"
+      grep -roniE 'public static void main\(' "$S2_DECOMPILED" 2>/dev/null | head -5
+      grep -roniE 'onInitialize|onClientSetup|premain' "$S2_DECOMPILED" 2>/dev/null | head -5
+
+      echo ""
+      echo "  Suspicious APIs:"
+      grep -roniE 'Runtime\.exec|ProcessBuilder|URLClassLoader|defineClass|HttpClient|HttpURLConnection|Socket|InetAddress' "$S2_DECOMPILED" 2>/dev/null | head -10
+
+      echo ""
+      echo "  Network:"
+      grep -roniE 'https?://[^"\s<>{}|\^`\[\]]+' "$S2_DECOMPILED" 2>/dev/null | sort -u | head -10
+
+      echo ""
+      echo "  Obfuscation:"
+      grep -roniE 'Class\.forName|Method\.invoke|MethodHandles|ClassLoader\.defineClass|sun\.misc\.Unsafe' "$S2_DECOMPILED" 2>/dev/null | head -5
+
+      echo ""
+      echo "  --- Stage-2 workspace: ${S2_RUN} ---"
+    fi
+  else
+    echo "  Failed to download"
+  fi
+done < "${JARSEC_RUN}/stage2_urls.txt"
+
+echo ""
+echo "Stage-2 analysis complete. ${STAGE2_COUNT} URL(s) processed."
+```
+
+### Report stage-2 findings
+
+For each downloaded payload, include in final report:
+| Field | Value |
+|-------|-------|
+| URL | Source URL |
+| SHA256 | Payload hash |
+| Size | Bytes |
+| Type | JAR / EXE / DLL / Other |
+| Static Verdict | CLEAN / SUSPICIOUS / MALICIOUS (from quick grep) |
+
 ## Step 5: Synthesis & Final Report
 
-Compile findings from all agents + dynamic sandbox.
+Compile findings from all agents + dynamic sandbox + stage-2 analysis.
 
 For each category state: **PASS / SUSPICIOUS / FAIL**
 
@@ -456,5 +565,6 @@ If suspicious/malicious activity found, list:
 |------|-----|
 | Network | IPs, Domains, URLs, Telegram, Blockchain, Discord Webhooks |
 | Host | SHA256 of payloads, modified paths, scheduled tasks, registry keys |
+| Stage-2 | URLs, SHA256s, and verdicts of secondary payloads |
 
 **Final verdict (single word): CLEAN / SUSPICIOUS / MALICIOUS**
